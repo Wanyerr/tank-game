@@ -149,6 +149,8 @@
   const BULLET_SPEED = 2;
   const MAX_BULLETS = 16;
   const SHOOT_COOLDOWN = 3;
+  // AI shoot cooldown: player cooldown + 1 second (1000ms ≈ 6 ticks at 180ms/tick)
+  const AI_SHOOT_COOLDOWN_EXTRA = Math.ceil(1000 / TICK_MS);
 
   // Tank speed (1 = 1 grid/tick, 0.8 = 20% slower)
   const MOVE_SPEED = 0.48;
@@ -276,6 +278,8 @@
       deathAlpha: 1.0,
       shootCooldown: 0,
       moveProgress: 0,    // accumulator for sub-tick movement (0.0–1.0)
+      dirChangeTimer: 0,  // ticks remaining before AI changes direction (0 = change now)
+      shootDelayTimer: -1, // -1 = no delay, 2-4 = ticks to wait before firing
     };
   }
 
@@ -365,7 +369,10 @@
     aiTanks = [];
     for (let i = 0; i < Math.min(4, aiPositions.length); i++) {
       const pos = aiPositions[i];
-      aiTanks.push(createTank(pos.col, pos.row, aiDirs[i], aiColors[i], false));
+      const ai = createTank(pos.col, pos.row, aiDirs[i], aiColors[i], false);
+      // Initialize AI direction change timer to random 3-6 ticks
+      ai.dirChangeTimer = 3 + Math.floor(Math.random() * 4);
+      aiTanks.push(ai);
     }
 
     score = 0;
@@ -528,37 +535,47 @@
     if (ai.moveProgress < 1) return;
     ai.moveProgress -= 1;
 
-    // 50% chance random direction
-    if (Math.random() < 0.5) {
-      const randDir = Math.floor(Math.random() * 4);
-      tryAIMoveInDir(ai, randDir);
-      return;
+    // Decrement direction change timer
+    ai.dirChangeTimer--;
+
+    // Only change direction when timer reaches 0
+    if (ai.dirChangeTimer <= 0) {
+      // Randomize new direction (3-6 ticks from now)
+      ai.dirChangeTimer = 3 + Math.floor(Math.random() * 4);
+
+      // 50% chance random direction
+      if (Math.random() < 0.5) {
+        const randDir = Math.floor(Math.random() * 4);
+        tryAIMoveInDir(ai, randDir);
+        return;
+      }
+
+      // Move toward nearest tank
+      const target = findNearestTank(ai);
+      if (!target) return;
+
+      const dc = target.col - ai.col;
+      const dr = target.row - ai.row;
+
+      // Try to move in the axis with larger distance first
+      let dirs = [];
+      if (Math.abs(dc) >= Math.abs(dr)) {
+        dirs = [dc > 0 ? DIR.RIGHT : DIR.LEFT, dr > 0 ? DIR.DOWN : DIR.UP];
+      } else {
+        dirs = [dr > 0 ? DIR.DOWN : DIR.UP, dc > 0 ? DIR.RIGHT : DIR.LEFT];
+      }
+
+      for (const d of dirs) {
+        if (tryAIMoveInDir(ai, d)) return;
+      }
+
+      // If preferred directions blocked, try other two directions
+      for (let d = 0; d < 4; d++) {
+        if (dirs.includes(d)) continue;
+        if (tryAIMoveInDir(ai, d)) return;
+      }
     }
-
-    // Move toward nearest tank
-    const target = findNearestTank(ai);
-    if (!target) return;
-
-    const dc = target.col - ai.col;
-    const dr = target.row - ai.row;
-
-    // Try to move in the axis with larger distance first
-    let dirs = [];
-    if (Math.abs(dc) >= Math.abs(dr)) {
-      dirs = [dc > 0 ? DIR.RIGHT : DIR.LEFT, dr > 0 ? DIR.DOWN : DIR.UP];
-    } else {
-      dirs = [dr > 0 ? DIR.DOWN : DIR.UP, dc > 0 ? DIR.RIGHT : DIR.LEFT];
-    }
-
-    for (const d of dirs) {
-      if (tryAIMoveInDir(ai, d)) return;
-    }
-
-    // If preferred directions blocked, try other two directions
-    for (let d = 0; d < 4; d++) {
-      if (dirs.includes(d)) continue;
-      if (tryAIMoveInDir(ai, d)) return;
-    }
+    // When dirChangeTimer > 0, AI keeps current direction (no direction change)
   }
 
   function getAliveCount() {
@@ -572,6 +589,33 @@
 
   // ======================== AI SHOOTING ========================
   function tryAIShoot(ai) {
+    if (!ai.alive || ai.dying || gameOver) return;
+    if (ai.shootCooldown > 0) return;
+    if (ai.shootDelayTimer > 0) return; // Still in delay period, wait
+
+    const target = findNearestTank(ai);
+    if (!target) return;
+
+    // Check if same row or same column
+    const sameRow = (ai.row === target.row);
+    const sameCol = (ai.col === target.col);
+    if (!sameRow && !sameCol) return;
+
+    // Determine direction to target
+    let shootDir;
+    if (sameRow) {
+      shootDir = target.col > ai.col ? DIR.RIGHT : DIR.LEFT;
+    } else {
+      shootDir = target.row > ai.row ? DIR.DOWN : DIR.UP;
+    }
+
+    // Face target and start shoot delay (2-4 ticks)
+    ai.dir = shootDir;
+    ai.shootDelayTimer = 2 + Math.floor(Math.random() * 3);
+  }
+
+  // Fire immediately (used when delay expires)
+  function aiFireBullet(ai) {
     if (!ai.alive || ai.dying || gameOver) return;
     if (ai.shootCooldown > 0) return;
 
@@ -591,7 +635,7 @@
       shootDir = target.row > ai.row ? DIR.DOWN : DIR.UP;
     }
 
-    // Face and fire
+    // Face and fire immediately
     ai.dir = shootDir;
     fireBullet(ai);
   }
@@ -624,7 +668,12 @@
     const b = createBullet(tank);
     if (b) {
       bullets.push(b);
-      tank.shootCooldown = SHOOT_COOLDOWN;
+      // AI has 1 second longer cooldown than player
+      if (!tank.isPlayer) {
+        tank.shootCooldown = SHOOT_COOLDOWN + AI_SHOOT_COOLDOWN_EXTRA;
+      } else {
+        tank.shootCooldown = SHOOT_COOLDOWN;
+      }
     }
   }
 
@@ -770,7 +819,37 @@
     for (const ai of aiTanks) {
       moveAI(ai);
       if (ai.shootCooldown > 0) ai.shootCooldown--;
-      tryAIShoot(ai);
+      
+      // Process shoot delay timer
+      if (ai.shootDelayTimer > 0) {
+        // Still in delay period, decrement
+        ai.shootDelayTimer--;
+      } else if (ai.shootDelayTimer === 0) {
+        // Delay expired, fire now
+        aiFireBullet(ai);
+        ai.shootDelayTimer = -1; // Reset to -1
+      }
+      
+      // Check if we should start shooting (only when not in delay and cooldown ready)
+      if (ai.shootDelayTimer === -1 && ai.shootCooldown === 0) {
+        const target = findNearestTank(ai);
+        if (target) {
+          const sameRow = (ai.row === target.row);
+          const sameCol = (ai.col === target.col);
+          if (sameRow || sameCol) {
+            // Determine direction to target
+            let shootDir;
+            if (sameRow) {
+              shootDir = target.col > ai.col ? DIR.RIGHT : DIR.LEFT;
+            } else {
+              shootDir = target.row > ai.row ? DIR.DOWN : DIR.UP;
+            }
+            // Face target and start delay
+            ai.dir = shootDir;
+            ai.shootDelayTimer = 2 + Math.floor(Math.random() * 3); // 2-4 ticks delay
+          }
+        }
+      }
     }
 
     // Bullets
