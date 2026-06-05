@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>坦克大战</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    touch-action: none;
+    user-select: none;
+  }
+  .game-container {
+    background: #16213e;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .hud {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 4px 12px 4px;
+    color: #e0e0e0;
+    font-size: 18px;
+    font-weight: bold;
+  }
+  .hud span { color: #ffd700; }
+  .hud .restart-btn {
+    background: #e74c3c;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 14px;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .hud .restart-btn:active { background: #c0392b; }
+  canvas {
+    display: block;
+    border: 2px solid #0f3460;
+    border-radius: 4px;
+    background: #2d2d44;
+    width: 600px;
+    height: 600px;
+    touch-action: none;
+  }
+  .touch-controls {
+    display: none;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    margin-top: 14px;
+    padding: 8px;
+  }
+  .touch-controls .dpad {
+    display: grid;
+    grid-template-columns: 56px 56px 56px;
+    grid-template-rows: 56px 56px 56px;
+    gap: 4px;
+  }
+  .touch-controls .dpad button {
+    width: 56px;
+    height: 56px;
+    font-size: 24px;
+    border: none;
+    border-radius: 8px;
+    background: #0f3460;
+    color: #e0e0e0;
+    cursor: pointer;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .touch-controls .dpad button:active { background: #1a5276; }
+  .touch-controls .dpad .btn-up    { grid-column: 2; grid-row: 1; }
+  .touch-controls .dpad .btn-left  { grid-column: 1; grid-row: 2; }
+  .touch-controls .dpad .btn-right { grid-column: 3; grid-row: 2; }
+  .touch-controls .dpad .btn-down  { grid-column: 2; grid-row: 3; }
+
+  .touch-controls .fire-btn {
+    width: 64px;
+    height: 64px;
+    font-size: 20px;
+    border: none;
+    border-radius: 50%;
+    background: #e74c3c;
+    color: #fff;
+    cursor: pointer;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    font-weight: bold;
+  }
+  .touch-controls .fire-btn:active { background: #c0392b; }
+
+  @media (pointer: coarse) {
+    .touch-controls { display: flex; }
+    canvas { width: 100%; height: auto; aspect-ratio: 1/1; max-width: 600px; }
+  }
+</style>
+</head>
+<body>
+<div class="game-container">
+  <div class="hud">
+    <div>⏱ <span id="timerDisplay">0</span>s</div>
+    <div>🏆 <span id="scoreDisplay">0</span></div>
+    <div>🚀 <span id="aliveDisplay">0</span></div>
+    <button class="restart-btn" id="hudRestartBtn">↻ 重启</button>
+  </div>
+  <canvas id="gameCanvas" width="600" height="600"></canvas>
+  <div class="touch-controls" id="touchControls">
+    <div class="dpad">
+      <button class="btn-up"    data-dir="up">▲</button>
+      <button class="btn-left"  data-dir="left">◀</button>
+      <button class="btn-right" data-dir="right">▶</button>
+      <button class="btn-down"  data-dir="down">▼</button>
+    </div>
+    <button class="fire-btn" id="touchFire">🔥</button>
+  </div>
+</div>
+<script>
+(function() {
+  'use strict';
+
+  // ======================== CONSTANTS ========================
+  const COLS = 15;
+  const ROWS = 15;
+  const CELL_SIZE = 40; // 600 / 15
+  const TICK_MS = 180;
+
+  // Tile types
+  const TILE_EMPTY = 0;
+  const TILE_STEEL = 1;
+  const TILE_BRICK = 2;
+
+  // Directions
+  const DIR = { UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3 };
+  const DX = [0, 1, 0, -1];
+  const DY = [-1, 0, 1, 0];
+
+  // Bullet constants
+  const BULLET_SPEED = 2;
+  const MAX_BULLETS = 16;
+  const SHOOT_COOLDOWN = 3;
+
+  // Tank speed (1 = 1 grid/tick, 0.8 = 20% slower)
+  const MOVE_SPEED = 0.48;
+
+  // ======================== MAP ========================
+  // 0=empty, 1=steel, 2=brick
+  function createMap() {
+    const map = [];
+    for (let r = 0; r < ROWS; r++) {
+      map[r] = [];
+      for (let c = 0; c < COLS; c++) {
+        // Outer ring = steel walls
+        if (r === 0 || r === ROWS - 1 || c === 0 || c === COLS - 1) {
+          map[r][c] = TILE_STEEL;
+        } else {
+          map[r][c] = TILE_EMPTY;
+        }
+      }
+    }
+
+    // Scatter brick walls in the inner area (rows 2..12, cols 2..12)
+    const brickPattern = [
+      [2,2], [2,3], [2,7], [2,11], [2,12],
+      [3,2], [3,5], [3,9], [3,12],
+      [4,4], [4,6], [4,8], [4,10],
+      [5,2], [5,5], [5,9], [5,12],
+      [6,3], [6,7], [6,11],
+      [7,4], [7,6], [7,8], [7,10],
+      [8,3], [8,7], [8,11],
+      [9,2], [9,5], [9,9], [9,12],
+      [10,4], [10,6], [10,8], [10,10],
+      [11,2], [11,5], [11,9], [11,12],
+      [12,2], [12,3], [12,7], [12,11], [12,12],
+    ];
+    for (const [r, c] of brickPattern) {
+      if (r > 0 && r < ROWS - 1 && c > 0 && c < COLS - 1) {
+        map[r][c] = TILE_BRICK;
+      }
+    }
+    // Replace 8 random bricks with steel blocks (no closed loop)
+    replaceBricksWithSteel(map, brickPattern);
+    return map;
+  }
+
+  // Pick 8 brick positions and convert to steel, ensuring no closed loop
+  function replaceBricksWithSteel(map, brickPattern) {
+    // Collect all brick positions from the pattern
+    const candidates = brickPattern.filter(([r, c]) =>
+      r > 0 && r < ROWS - 1 && c > 0 && c < COLS - 1
+    );
+
+    // Try up to 100 times to find a valid arrangement
+    for (let attempt = 0; attempt < 100; attempt++) {
+      // Shuffle candidates
+      const shuffled = [...candidates];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+
+      const selected = shuffled.slice(0, 8);
+
+      // Check: no 2×2 all-steel block (smallest closed loop)
+      let valid = true;
+      const steelSet = new Set(selected.map(([r, c]) => r * COLS + c));
+      for (const [r, c] of selected) {
+        // Check 4 corners of a 2×2 square
+        if (steelSet.has(r * COLS + c + 1) &&
+            steelSet.has((r + 1) * COLS + c) &&
+            steelSet.has((r + 1) * COLS + c + 1)) {
+          valid = false;
+          break;
+        }
+      }
+      if (!valid) continue;
+
+      // Check: no cycle in steel adjacency graph
+      const visited = new Set();
+      let hasCycle = false;
+
+      function dfs(r, c, pr, pc) {
+        const key = r * COLS + c;
+        if (visited.has(key)) { hasCycle = true; return; }
+        visited.add(key);
+        for (const [dr, dc] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+          const nr = r + dr, nc = c + dc;
+          if (nr === pr && nc === pc) continue;
+          if (steelSet.has(nr * COLS + nc)) {
+            dfs(nr, nc, r, c);
+            if (hasCycle) return;
+          }
+        }
+      }
+
+      for (const [r, c] of selected) {
+        if (!visited.has(r * COLS + c)) {
+          dfs(r, c, -1, -1);
+          if (hasCycle) break;
+        }
+      }
+      if (hasCycle) continue;
+
+      // Valid arrangement found — apply to map
+      for (const [r, c] of selected) {
+        map[r][c] = TILE_STEEL;
+      }
+      return;
+    }
+    // Fallback: just place 8 steel without cycle check (very unlikely)
+    const fallback = candidates.slice(0, 8);
+    for (const [r, c] of fallback) {
+      map[r][c] = TILE_STEEL;
+    }
+  }
+
+  // ======================== TANK ========================
+  function createTank(col, row, dir, color, isPlayer) {
+    return {
+      col, row,           // grid position (col, row)
+      dir,                // direction (DIR constant)
+      color,              // body color
+      isPlayer,           // boolean
+      alive: true,
+      dying: false,
+      deathAlpha: 1.0,
+      shootCooldown: 0,
+      moveProgress: 0,    // accumulator for sub-tick movement (0.0–1.0)
+    };
+  }
+
+  // ======================== GAME STATE ========================
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const timerDisplay = document.getElementById('timerDisplay');
+  const scoreDisplay = document.getElementById('scoreDisplay');
+  const aliveDisplay = document.getElementById('aliveDisplay');
+
+  let map = createMap();
+  let player = null;
+  let aiTanks = [];
+  let bullets = [];
+  let bulletIdCounter = 0;
+  let score = 0;
+  let gameTime = 0;       // seconds
+  let gameOver = false;
+  let gameResult = '';    // 'win' or 'lose'
+
+  // Input state
+  const keys = {};
+
+  // ======================== INIT TANKS ========================
+  function getEmptySpawnPositions() {
+    const positions = [];
+    for (let r = 1; r < ROWS - 1; r++) {
+      for (let c = 1; c < COLS - 1; c++) {
+        if (map[r][c] === TILE_EMPTY) {
+          positions.push({ col: c, row: r });
+        }
+      }
+    }
+    return positions;
+  }
+
+  function initGame() {
+    map = createMap();
+
+    // Place player at bottom center (col=7, row=13, row 13)
+    player = createTank(7, 13, DIR.UP, '#3498db', true);
+
+    // Spawn 4 AI tanks — no two tanks share same row or column at start
+    const emptyPositions = getEmptySpawnPositions().filter(
+      p => !(p.col === 7 && p.row === 13)
+    );
+
+    // Find 4 positions respecting row/column uniqueness
+    function pickDistinctPositions() {
+      // Shuffle once
+      const pool = [...emptyPositions];
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+
+      // Greedy: pick positions that don't conflict with player or each other
+      const usedRows = new Set([13]);
+      const usedCols = new Set([7]);
+      const result = [];
+      for (const p of pool) {
+        if (result.length >= 4) break;
+        if (!usedRows.has(p.row) && !usedCols.has(p.col)) {
+          usedRows.add(p.row);
+          usedCols.add(p.col);
+          result.push(p);
+        }
+      }
+      return result;
+    }
+
+    let aiPositions = pickDistinctPositions();
+
+    // Fallback: if can't find 4 unique row/col positions, relax uniqueness
+    if (aiPositions.length < 4) {
+      const pool = [...emptyPositions];
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+      // Still avoid player row+col
+      aiPositions = pool.filter(p => p.row !== 13 && p.col !== 7).slice(0, 4);
+    }
+
+    const aiColors = ['#e74c3c', '#2ecc71', '#9b59b6', '#e67e22'];
+    const aiDirs = [DIR.DOWN, DIR.DOWN, DIR.UP, DIR.UP];
+    aiTanks = [];
+    for (let i = 0; i < Math.min(4, aiPositions.length); i++) {
+      const pos = aiPositions[i];
+      aiTanks.push(createTank(pos.col, pos.row, aiDirs[i], aiColors[i], false));
+    }
+
+    score = 0;
+    gameTime = 0;
+    gameOver = false;
+    gameResult = '';
+    bullets = [];
+    bulletIdCounter = 0;
+    updateHUD();
+  }
+
+  // ======================== COLLISION ========================
+  function isOccupiedByTank(col, row, ignoreTank) {
+    // Check player
+    if (player && player.alive && !player.dying &&
+        player.col === col && player.row === row &&
+        (ignoreTank !== player)) return true;
+    // Check AI tanks
+    for (const ai of aiTanks) {
+      if (ai === ignoreTank) continue;
+      if (ai.alive && !ai.dying && ai.col === col && ai.row === row) return true;
+    }
+    return false;
+  }
+
+  function canMoveTo(col, row, ignoreTank) {
+    // Boundary check
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return false;
+    // Wall check
+    if (map[row][col] !== TILE_EMPTY) return false;
+    // Tank overlap check
+    if (isOccupiedByTank(col, row, ignoreTank)) return false;
+    return true;
+  }
+
+  // ======================== PLAYER MOVEMENT ========================
+  function tryMoveTank(tank, dir) {
+    // Accumulator-based movement: only actually move when progress >= 1
+    tank.moveProgress += MOVE_SPEED;
+    if (tank.moveProgress < 1) return false;
+    tank.moveProgress -= 1;
+
+    tank.dir = dir;
+    const nc = tank.col + DX[dir];
+    const nr = tank.row + DY[dir];
+    if (canMoveTo(nc, nr, tank)) {
+      tank.col = nc;
+      tank.row = nr;
+      return true;
+    }
+    return false;
+  }
+
+  function movePlayer(dir) {
+    if (!player.alive || player.dying || gameOver) return;
+    tryMoveTank(player, dir);
+  }
+
+  // ======================== INPUT HANDLING ========================
+  document.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    // Prevent default for game keys
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','W','a','A','s','S','d','D','j','J',' '].includes(e.key)) {
+      e.preventDefault();
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    keys[e.key] = false;
+  });
+
+  function getKeysDirection() {
+    if (keys['ArrowUp'] || keys['w'] || keys['W']) return DIR.UP;
+    if (keys['ArrowDown'] || keys['s'] || keys['S']) return DIR.DOWN;
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) return DIR.LEFT;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) return DIR.RIGHT;
+    return -1;
+  }
+
+  // ======================== TOUCH CONTROLS ========================
+  const touchDirs = {};
+  let touchFire = false;
+  document.querySelectorAll('[data-dir]').forEach(btn => {
+    const dirMap = { 'up': DIR.UP, 'down': DIR.DOWN, 'left': DIR.LEFT, 'right': DIR.RIGHT };
+    const dir = dirMap[btn.dataset.dir];
+    const startMove = (e) => {
+      e.preventDefault();
+      touchDirs[btn.dataset.dir] = true;
+    };
+    const stopMove = (e) => {
+      e.preventDefault();
+      touchDirs[btn.dataset.dir] = false;
+    };
+    btn.addEventListener('touchstart', startMove, { passive: false });
+    btn.addEventListener('touchend', stopMove, { passive: false });
+    btn.addEventListener('touchcancel', stopMove, { passive: false });
+    btn.addEventListener('mousedown', startMove);
+    btn.addEventListener('mouseup', stopMove);
+    btn.addEventListener('mouseleave', stopMove);
+  });
+
+  function getTouchDirection() {
+    if (touchDirs['up']) return DIR.UP;
+    if (touchDirs['down']) return DIR.DOWN;
+    if (touchDirs['left']) return DIR.LEFT;
+    if (touchDirs['right']) return DIR.RIGHT;
+    return -1;
+  }
+
+  // Touch fire button
+  const fireBtn = document.getElementById('touchFire');
+  fireBtn.addEventListener('touchstart', (e) => { e.preventDefault(); touchFire = true; }, { passive: false });
+  fireBtn.addEventListener('touchend', (e) => { e.preventDefault(); touchFire = false; }, { passive: false });
+  fireBtn.addEventListener('touchcancel', (e) => { touchFire = false; }, { passive: false });
+  fireBtn.addEventListener('mousedown', () => { touchFire = true; });
+  fireBtn.addEventListener('mouseup', () => { touchFire = false; });
+  fireBtn.addEventListener('mouseleave', () => { touchFire = false; });
+
+  // ======================== AI ========================
+  function getAliveTanks() {
+    const list = [];
+    if (player && player.alive && !player.dying) list.push(player);
+    for (const ai of aiTanks) {
+      if (ai.alive && !ai.dying) list.push(ai);
+    }
+    return list;
+  }
+
+  function findNearestTank(tank) {
+    const alive = getAliveTanks();
+    let nearest = null;
+    let minDist = Infinity;
+    for (const other of alive) {
+      if (other === tank) continue;
+      const d = Math.abs(other.col - tank.col) + Math.abs(other.row - tank.row);
+      if (d < minDist) {
+        minDist = d;
+        nearest = other;
+      }
+    }
+    return nearest;
+  }
+
+  function tryAIMoveInDir(ai, dir) {
+    ai.dir = dir;
+    const nc = ai.col + DX[dir];
+    const nr = ai.row + DY[dir];
+    if (canMoveTo(nc, nr, ai)) {
+      ai.col = nc;
+      ai.row = nr;
+      return true;
+    }
+    return false;
+  }
+
+  function moveAI(ai) {
+    if (!ai.alive || ai.dying || gameOver) return;
+
+    // Accumulator-based speed (same as player)
+    ai.moveProgress += MOVE_SPEED;
+    if (ai.moveProgress < 1) return;
+    ai.moveProgress -= 1;
+
+    // 50% chance random direction
+    if (Math.random() < 0.5) {
+      const randDir = Math.floor(Math.random() * 4);
+      tryAIMoveInDir(ai, randDir);
+      return;
+    }
+
+    // Move toward nearest tank
+    const target = findNearestTank(ai);
+    if (!target) return;
+
+    const dc = target.col - ai.col;
+    const dr = target.row - ai.row;
+
+    // Try to move in the axis with larger distance first
+    let dirs = [];
+    if (Math.abs(dc) >= Math.abs(dr)) {
+      dirs = [dc > 0 ? DIR.RIGHT : DIR.LEFT, dr > 0 ? DIR.DOWN : DIR.UP];
+    } else {
+      dirs = [dr > 0 ? DIR.DOWN : DIR.UP, dc > 0 ? DIR.RIGHT : DIR.LEFT];
+    }
+
+    for (const d of dirs) {
+      if (tryAIMoveInDir(ai, d)) return;
+    }
+
+    // If preferred directions blocked, try other two directions
+    for (let d = 0; d < 4; d++) {
+      if (dirs.includes(d)) continue;
+      if (tryAIMoveInDir(ai, d)) return;
+    }
+  }
+
+  function getAliveCount() {
+    let count = 0;
+    for (const ai of aiTanks) {
+      if (ai.alive && !ai.dying) count++;
+    }
+    if (player && player.alive && !player.dying) count++;
+    return count;
+  }
+
+  // ======================== AI SHOOTING ========================
+  function tryAIShoot(ai) {
+    if (!ai.alive || ai.dying || gameOver) return;
+    if (ai.shootCooldown > 0) return;
+
+    const target = findNearestTank(ai);
+    if (!target) return;
+
+    // Check if same row or same column
+    const sameRow = (ai.row === target.row);
+    const sameCol = (ai.col === target.col);
+    if (!sameRow && !sameCol) return;
+
+    // Determine direction to target
+    let shootDir;
+    if (sameRow) {
+      shootDir = target.col > ai.col ? DIR.RIGHT : DIR.LEFT;
+    } else {
+      shootDir = target.row > ai.row ? DIR.DOWN : DIR.UP;
+    }
+
+    // Face and fire
+    ai.dir = shootDir;
+    fireBullet(ai);
+  }
+
+  // ======================== BULLET SYSTEM ========================
+  function createBullet(tank) {
+    if (!tank.alive || tank.dying) return null;
+    if (bullets.length >= MAX_BULLETS) return null;
+
+    // Spawn 1 cell ahead of tank
+    const spawnCol = tank.col + DX[tank.dir];
+    const spawnRow = tank.row + DY[tank.dir];
+
+    // Don't fire if spawn is out of bounds
+    if (spawnCol < 0 || spawnCol >= COLS || spawnRow < 0 || spawnRow >= ROWS) return null;
+
+    bulletIdCounter++;
+    return {
+      id: bulletIdCounter,
+      col: spawnCol,
+      row: spawnRow,
+      dir: tank.dir,
+      owner: tank,
+      alive: true,
+      createdTick: tickCount,
+    };
+  }
+
+  function fireBullet(tank) {
+    const b = createBullet(tank);
+    if (b) {
+      bullets.push(b);
+      tank.shootCooldown = SHOOT_COOLDOWN;
+    }
+  }
+
+  function updateBullets() {
+    for (let bi = bullets.length - 1; bi >= 0; bi--) {
+      const b = bullets[bi];
+      if (!b.alive) { bullets.splice(bi, 1); continue; }
+
+      // On creation tick: check collision at spawn position but don't move
+      if (b.createdTick === tickCount) {
+        if (!checkBulletCollision(b)) { b.alive = false; bullets.splice(bi, 1); }
+        continue;
+      }
+
+      // Move step by step (1 cell at a time) to detect intermediate collisions
+      let removed = false;
+      for (let step = 0; step < BULLET_SPEED; step++) {
+        b.col += DX[b.dir];
+        b.row += DY[b.dir];
+
+        // Out of bounds → remove
+        if (b.col < 0 || b.col >= COLS || b.row < 0 || b.row >= ROWS) {
+          b.alive = false;
+          removed = true;
+          break;
+        }
+
+        if (!checkBulletCollision(b)) {
+          b.alive = false;
+          removed = true;
+          break;
+        }
+      }
+      if (removed) { bullets.splice(bi, 1); }
+    }
+  }
+
+  // Returns false if bullet should be destroyed (hit something), true if it can continue
+  function checkBulletCollision(b) {
+    const gc = Math.round(b.col);
+    const gr = Math.round(b.row);
+    if (gc < 0 || gc >= COLS || gr < 0 || gr >= ROWS) return true;
+
+    // Steel wall → bullet destroyed
+    if (map[gr][gc] === TILE_STEEL) return false;
+
+    // Brick wall → wall destroyed, bullet destroyed
+    if (map[gr][gc] === TILE_BRICK) {
+      map[gr][gc] = TILE_EMPTY;
+      return false;
+    }
+
+    // Player hit
+    if (player && player.alive && !player.dying && b.owner !== player &&
+        player.col === gc && player.row === gr) {
+      player.alive = false;
+      player.dying = true;
+      player.deathAlpha = 1.0;
+      return false;
+    }
+
+    // AI tank hit (first tank found is hit; AI `alive=false` ensures only one per bullet)
+    for (const ai of aiTanks) {
+      if (ai.alive && !ai.dying && b.owner !== ai &&
+          ai.col === gc && ai.row === gr) {
+        ai.alive = false;
+        ai.dying = true;
+        ai.deathAlpha = 1.0;
+        if (b.owner === player) score += 100;
+        return false;
+      }
+    }
+
+    return true; // nothing hit, bullet continues
+  }
+
+  let lastTime = 0;
+  let accumulator = 0;
+  let tickCount = 0;
+
+  // Snapshot for interpolation
+  let snapshot = null;
+
+  function takeSnapshot() {
+    snapshot = {
+      player: player ? { col: player.col, row: player.row, dir: player.dir } : null,
+      aiTanks: aiTanks.map(ai => ({
+        col: ai.col, row: ai.row, dir: ai.dir,
+        alive: ai.alive, dying: ai.dying, deathAlpha: ai.deathAlpha
+      })),
+      bullets: bullets.map(b => ({
+        id: b.id, col: b.col, row: b.row, dir: b.dir, alive: b.alive,
+      })),
+    };
+  }
+
+  function update() {
+    if (gameOver) {
+      // During game over: only process death fade-out for visual effect
+      if (player && player.dying) {
+        player.deathAlpha -= 0.15;
+        if (player.deathAlpha <= 0) { player.deathAlpha = 0; player.dying = false; }
+      }
+      for (const ai of aiTanks) {
+        if (ai.dying) {
+          ai.deathAlpha -= 0.15;
+          if (ai.deathAlpha <= 0) { ai.deathAlpha = 0; ai.dying = false; }
+        }
+      }
+      return;
+    }
+
+    tickCount++;
+    gameTime = tickCount * TICK_MS / 1000;
+
+    // Process death fade-out for all tanks
+    if (player && player.dying) {
+      player.deathAlpha -= 0.15;
+      if (player.deathAlpha <= 0) { player.deathAlpha = 0; player.dying = false; }
+    }
+    for (const ai of aiTanks) {
+      if (ai.dying) {
+        ai.deathAlpha -= 0.15;
+        if (ai.deathAlpha <= 0) { ai.deathAlpha = 0; ai.dying = false; }
+      }
+    }
+
+    // Player movement
+    const dir = getKeysDirection() !== -1 ? getKeysDirection() : getTouchDirection();
+    if (dir !== -1) {
+      movePlayer(dir);
+    }
+
+    // Player shooting (J or Space or touch fire, auto-fire on hold)
+    if (player && player.alive && !player.dying) {
+      if (player.shootCooldown > 0) player.shootCooldown--;
+      if ((keys['j'] || keys['J'] || keys[' '] || touchFire) && player.shootCooldown === 0) {
+        fireBullet(player);
+      }
+    }
+
+    // AI
+    for (const ai of aiTanks) {
+      moveAI(ai);
+      if (ai.shootCooldown > 0) ai.shootCooldown--;
+      tryAIShoot(ai);
+    }
+
+    // Bullets
+    updateBullets();
+
+    // Game over detection — triggers immediately on hit
+    if (player && !player.alive) {
+      gameOver = true;
+      gameResult = 'lose';
+    } else if (player && player.alive) {
+      const aliveAiCount = aiTanks.filter(a => a.alive).length;
+      if (aliveAiCount === 0) {
+        gameOver = true;
+        gameResult = 'win';
+      }
+    }
+
+    updateHUD();
+  }
+
+  function updateHUD() {
+    timerDisplay.textContent = Math.floor(gameTime);
+    scoreDisplay.textContent = score;
+    aliveDisplay.textContent = getAliveCount();
+  }
+
+  // ======================== RENDER ========================
+  function drawCell(col, row, tileType) {
+    const x = col * CELL_SIZE;
+    const y = row * CELL_SIZE;
+    switch (tileType) {
+      case TILE_STEEL:
+        ctx.fillStyle = '#7f8c8d';
+        ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        // Steel highlight
+        ctx.fillStyle = '#95a5a6';
+        ctx.fillRect(x + 2, y + 2, CELL_SIZE - 4, 3);
+        ctx.fillRect(x + 2, y + 2, 3, CELL_SIZE - 4);
+        ctx.fillStyle = '#5d6d7e';
+        ctx.fillRect(x + CELL_SIZE - 3, y + CELL_SIZE - 3, 2, 2);
+        break;
+      case TILE_BRICK:
+        ctx.fillStyle = '#c0392b';
+        ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        // Brick pattern
+        ctx.strokeStyle = '#922b21';
+        ctx.lineWidth = 1;
+        // Horizontal lines
+        for (let i = 0; i < CELL_SIZE; i += 10) {
+          ctx.beginPath();
+          ctx.moveTo(x, y + i);
+          ctx.lineTo(x + CELL_SIZE, y + i);
+          ctx.stroke();
+        }
+        // Vertical lines (offset every other row)
+        for (let rowOff = 0; rowOff < 4; rowOff++) {
+          const yy = y + rowOff * 10;
+          const off = (rowOff % 2) * (CELL_SIZE / 2);
+          ctx.beginPath();
+          ctx.moveTo(x + off, yy);
+          ctx.lineTo(x + off, yy + 10);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x + off + CELL_SIZE / 2, yy);
+          ctx.lineTo(x + off + CELL_SIZE / 2, yy + 10);
+          ctx.stroke();
+        }
+        break;
+      case TILE_EMPTY:
+        ctx.fillStyle = '#2d2d44';
+        ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        // Grid line
+        ctx.strokeStyle = '#3a3a55';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(x, y, CELL_SIZE, CELL_SIZE);
+        break;
+    }
+  }
+
+  function drawTank(tank, alpha) {
+    if (!tank || (!tank.alive && !tank.dying)) return;
+    drawTankAt(tank, tank.col, tank.row, alpha != null ? alpha : 1.0);
+  }
+
+  function drawTankAt(tank, drawCol, drawRow, alpha) {
+    const x = drawCol * CELL_SIZE;
+    const y = drawRow * CELL_SIZE;
+    const cx = x + CELL_SIZE / 2;
+    const cy = y + CELL_SIZE / 2;
+    const half = CELL_SIZE * 0.35;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // Tank body
+    ctx.fillStyle = tank.color;
+    ctx.fillRect(x + 4, y + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+
+    // White identification ring for player
+    if (tank.isPlayer) {
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 6, y + 6, CELL_SIZE - 12, CELL_SIZE - 12);
+    }
+
+    // Barrel
+    ctx.fillStyle = tank.isPlayer ? '#2980b9' : '#c0392b';
+    const barrelLen = CELL_SIZE * 0.4;
+    const barrelW = 5;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(tank.dir * Math.PI / 2);
+    ctx.fillRect(-barrelW / 2, -barrelLen, barrelW, barrelLen);
+    ctx.restore();
+
+    // Direction indicator dot
+    ctx.fillStyle = '#f1c40f';
+    const tipX = cx + DX[tank.dir] * half;
+    const tipY = cy + DY[tank.dir] * half;
+    ctx.beginPath();
+    ctx.arc(tipX, tipY, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawBullet(bullet, col, row) {
+    const x = col * CELL_SIZE;
+    const y = row * CELL_SIZE;
+    const cx = x + CELL_SIZE / 2;
+    const cy = y + CELL_SIZE / 2;
+
+    ctx.save();
+    ctx.fillStyle = '#f1c40f';
+    ctx.shadowColor = '#f1c40f';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function render(interpolation) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw map
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        drawCell(c, r, map[r][c]);
+      }
+    }
+
+    // Interpolated player position
+    if (player && (player.alive || player.dying)) {
+      let drawCol = player.col;
+      let drawRow = player.row;
+
+      if (snapshot && snapshot.player) {
+        drawCol = snapshot.player.col + (player.col - snapshot.player.col) * interpolation;
+        drawRow = snapshot.player.row + (player.row - snapshot.player.row) * interpolation;
+      }
+
+      const a = player.dying ? player.deathAlpha : 1.0;
+      if (a > 0) {
+        drawTankAt(player, drawCol, drawRow, a);
+      }
+    }
+
+    // Draw AI tanks
+    for (let i = 0; i < aiTanks.length; i++) {
+      const ai = aiTanks[i];
+      if (!ai.alive && !ai.dying) continue;
+      let drawCol = ai.col;
+      let drawRow = ai.row;
+      if (snapshot && snapshot.aiTanks && snapshot.aiTanks[i]) {
+        const snapAi = snapshot.aiTanks[i];
+        drawCol = snapAi.col + (ai.col - snapAi.col) * interpolation;
+        drawRow = snapAi.row + (ai.row - snapAi.row) * interpolation;
+      }
+      const a = ai.dying ? ai.deathAlpha : 1.0;
+      if (a > 0) {
+        drawTankAt(ai, drawCol, drawRow, a);
+      }
+    }
+
+    // Draw bullets with interpolation
+    for (const b of bullets) {
+      if (!b.alive) continue;
+      let fx = b.col;
+      let fy = b.row;
+
+      if (snapshot && snapshot.bullets) {
+        const snapB = snapshot.bullets.find(sb => sb.id === b.id);
+        if (snapB) {
+          fx = snapB.col + (b.col - snapB.col) * interpolation;
+          fy = snapB.row + (b.row - snapB.row) * interpolation;
+        } else {
+          fx = b.col - DX[b.dir] * BULLET_SPEED * (1 - interpolation);
+          fy = b.row - DY[b.dir] * BULLET_SPEED * (1 - interpolation);
+        }
+      }
+      drawBullet(b, fx, fy);
+    }
+
+    // Game over overlay
+    if (gameOver) {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = gameResult === 'win' ? '#2ecc71' : '#e74c3c';
+      ctx.font = 'bold 48px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(gameResult === 'win' ? '胜利！' : '失败！', canvas.width / 2, canvas.height / 2 - 20);
+      ctx.fillStyle = '#ecf0f1';
+      ctx.font = '20px Arial';
+      ctx.fillText('点击「重启」重新开始', canvas.width / 2, canvas.height / 2 + 40);
+
+      // Restart button
+      ctx.fillStyle = '#3498db';
+      ctx.fillRect(canvas.width / 2 - 60, canvas.height / 2 + 70, 120, 40);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 18px Arial';
+      ctx.fillText('重启', canvas.width / 2, canvas.height / 2 + 90);
+    }
+  }
+
+  // ======================== RESTART ========================
+  function restartGame() {
+    initGame();
+    tickCount = 0;
+    gameOver = false;
+    lastTime = 0;
+    accumulator = 0;
+    snapshot = null;
+  }
+
+  // ======================== MAIN LOOP ========================
+  function gameLoop(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    let dt = timestamp - lastTime;
+    lastTime = timestamp;
+
+    // Clamp dt to prevent spiral of death
+    if (dt > 500) dt = TICK_MS;
+
+    accumulator += dt;
+
+    // Take snapshot before updating
+    takeSnapshot();
+
+    // Fixed timestep updates
+    while (accumulator >= TICK_MS) {
+      update();
+      accumulator -= TICK_MS;
+    }
+
+    // Interpolation factor (0..1)
+    const interpolation = accumulator / TICK_MS;
+
+    render(interpolation);
+
+    requestAnimationFrame(gameLoop);
+  }
+
+  // ======================== CANVAS CLICK FOR RESTART ========================
+  canvas.addEventListener('click', (e) => {
+    if (!gameOver) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+    if (mx >= canvas.width / 2 - 60 && mx <= canvas.width / 2 + 60 &&
+        my >= canvas.height / 2 + 70 && my <= canvas.height / 2 + 110) {
+      restartGame();
+    }
+  });
+
+  // Also support touch for restart
+  canvas.addEventListener('touchstart', (e) => {
+    if (!gameOver) return;
+    const touch = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (touch.clientX - rect.left) * scaleX;
+    const my = (touch.clientY - rect.top) * scaleY;
+    if (mx >= canvas.width / 2 - 60 && mx <= canvas.width / 2 + 60 &&
+        my >= canvas.height / 2 + 70 && my <= canvas.height / 2 + 110) {
+      restartGame();
+    }
+  }, { passive: true });
+
+  // ======================== HUD RESTART BUTTON ========================
+  document.getElementById('hudRestartBtn').addEventListener('click', restartGame);
+  document.getElementById('hudRestartBtn').addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    restartGame();
+  }, { passive: false });
+
+  // ======================== START ========================
+  initGame();
+  requestAnimationFrame(gameLoop);
+
+})();
+</script>
+</body>
+</html>
